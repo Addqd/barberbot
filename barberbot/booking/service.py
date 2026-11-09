@@ -273,6 +273,20 @@ class BookingService:
                 raise BookingNotFound(MESSAGE_NOT_FOUND)
             return cancelled
 
+    async def complete_finished_bookings(self) -> int:
+        """Перевести подтверждённые записи с ``ends_at <= now`` в ``completed``.
+
+        Одна транзакция с одним ``UPDATE`` в PostgreSQL: проверка срока и смена
+        статуса происходят атомарно, отменённые и уже завершённые записи не
+        затрагиваются. Возвращается количество изменённых записей.
+        """
+        now = self._now()
+        async with self._operation() as session:
+            repository = BookingRepository(session)
+            async with session.begin():
+                completed = await repository.complete_finished(now=now)
+        return completed
+
     # ------------------------------------------------------------------ #
     # Внутренние помощники
     # ------------------------------------------------------------------ #

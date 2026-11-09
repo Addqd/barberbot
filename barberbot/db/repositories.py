@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -206,6 +206,22 @@ class BookingRepository:
         booking.status = BookingStatus.CANCELLED
         booking.cancelled_at = cancelled_at
         await self._session.flush()
+
+    async def complete_finished(self, *, now: datetime) -> int:
+        """Завершить подтверждённые записи и вернуть их количество."""
+        updated = (
+            update(Booking)
+            .where(
+                Booking.status == BookingStatus.CONFIRMED,
+                Booking.ends_at <= now,
+            )
+            .values(status=BookingStatus.COMPLETED)
+            .returning(Booking.id)
+            .cte("completed_rows")
+        )
+
+        result = await self._session.execute(select(func.count()).select_from(updated))
+        return result.scalar_one()
 
     async def list_for_user(
         self, user_id: int, *, include_cancelled: bool = True

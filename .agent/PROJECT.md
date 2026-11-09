@@ -178,6 +178,32 @@ locations unless the user changes the scope.
   flows run through a real `Dispatcher.feed_update` with the real
   `BookingService` against `barberbot_test` only. No Telegram network calls.
 
+## Confirmed architecture — automatic booking completion
+
+- A `confirmed` booking whose service has already ended (`ends_at <= now`,
+  timezone-aware) is moved to `completed`. `cancelled` and `completed` rows and
+  not-yet-ended `confirmed` rows are never touched. The boundary is inclusive.
+- The status change is a single SQL `UPDATE`
+  (`WHERE status = 'confirmed' AND ends_at <= now`) executed through the
+  existing repository + service layer (`BookingRepository.complete_finished()`,
+  `BookingService.complete_finished_bookings()`). PostgreSQL row locking makes
+  concurrent runs conflict-free and idempotent; there is no new migration and
+  no schema change.
+- Scheduling uses the already installed APScheduler 3.x
+  (`barberbot/booking/completion.py`, `CompletionScheduler`): the scheduling
+  loop is one interval job (1 minute, `coalesce=True`, `max_instances=1`), not a
+  separate background-task system. The same class performs one sweep at start,
+  so bookings that ended during downtime are completed after a restart.
+- Lifecycle: `build_dispatcher()` creates the scheduler and keeps it in
+  `workflow_data`; `on_startup` performs the first sweep and starts the
+  interval, `on_shutdown` stops it. aiogram emits shutdown in a `finally`, so
+  the job is stopped on normal stop and on polling errors as well.
+- A temporary database error (`DatabaseUnavailable`) is logged as a warning and
+  does not stop the scheduler: the next interval retries. Domain messages stay
+  free of SQL/DSN details.
+- Booking, cancellation, listing, slot protection and the exclusion constraint
+  are unchanged: `completed` remains an active status for slot occupancy.
+
 ## Environment note
 
 - On the development machine direct TCP access to `api.telegram.org:443` is

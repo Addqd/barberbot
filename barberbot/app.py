@@ -9,6 +9,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import ErrorEvent, Message
 
+from barberbot.booking.completion import CompletionScheduler
 from barberbot.booking.service import BookingService
 from barberbot.config import Settings
 from barberbot.db.engine import Database, create_database
@@ -19,11 +20,15 @@ logger = logging.getLogger(__name__)
 ERROR_TEXT = "Произошла ошибка. Пожалуйста, попробуйте позже."
 
 
-async def on_startup(bot: Bot) -> None:
+async def on_startup(bot: Bot, completion_scheduler: CompletionScheduler) -> None:
+    # Обновление статусов при запуске: записи, завершившиеся пока бот был
+    # остановлен, получают ``completed`` до начала обработки обновлений.
+    await completion_scheduler.start()
     logger.info("Запуск long polling (bot id=%s)", bot.id)
 
 
-async def on_shutdown(bot: Bot) -> None:
+async def on_shutdown(bot: Bot, completion_scheduler: CompletionScheduler) -> None:
+    completion_scheduler.shutdown()
     logger.info("BarberBot остановлен")
 
 
@@ -49,10 +54,13 @@ def build_dispatcher(booking_service: BookingService) -> Dispatcher:
     ``booking_service`` попадает в ``workflow_data`` aiogram и передаётся
     обработчикам по имени аргумента. ``SimpleEventIsolation`` сериализует
     обновления одного чата: повторное нажатие «Подтвердить» не выполняется
-    параллельно с первым.
+    параллельно с первым. ``CompletionScheduler`` тоже живёт в
+    ``workflow_data``: его запускает ``on_startup``, останавливает
+    ``on_shutdown``, который aiogram вызывает и при ошибке polling.
     """
     dispatcher = Dispatcher(
         booking_service=booking_service,
+        completion_scheduler=CompletionScheduler(booking_service),
         events_isolation=SimpleEventIsolation(),
     )
     dispatcher.include_router(build_main_router())
