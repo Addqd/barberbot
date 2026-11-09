@@ -1,14 +1,17 @@
-"""Общие обработчики: главное меню и справка."""
+"""Общие обработчики: главное меню, справка, возврат в меню."""
 
 from __future__ import annotations
 
 import logging
 
-from aiogram import F, Router
+from aiogram import Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from barberbot.keyboards import MENU_CALLBACKS, main_menu_keyboard
+from barberbot.callbacks import FlowCancelCB, NavMainCB
+from barberbot.handlers.render import render
+from barberbot.keyboards import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +31,12 @@ HELP_TEXT = (
     "/help — эта справка"
 )
 
-IN_DEVELOPMENT_TEXT = "Этот раздел пока в разработке."
 
-
-async def handle_start(message: Message) -> None:
-    """Приветствие и главное меню."""
+async def handle_start(message: Message, state: FSMContext) -> None:
+    """Приветствие и главное меню; незавершённый сценарий сбрасывается."""
     user_id = message.from_user.id if message.from_user else "?"
     logger.info("Команда /start от пользователя id=%s", user_id)
+    await state.clear()
     await message.answer(START_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -43,22 +45,21 @@ async def handle_help(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
-async def handle_menu_callback(callback: CallbackQuery) -> None:
-    """Ответ на кнопки главного меню.
-
-    Callback всегда подтверждается, иначе у пользователя остаётся
-    индикатор загрузки на кнопке.
-    """
-    logger.info("Нажата кнопка меню %r", callback.data)
-    await callback.answer(IN_DEVELOPMENT_TEXT)
-    if isinstance(callback.message, Message):
-        await callback.message.answer(IN_DEVELOPMENT_TEXT)
+async def show_main_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """Вернуть пользователя в главное меню, очистив данные сценария."""
+    await callback.answer()
+    await state.clear()
+    await render(callback, START_TEXT, main_menu_keyboard())
 
 
 def build_router() -> Router:
-    """Создать роутер с обработчиками команд и кнопок."""
+    """Создать роутер с командами и возвратом в главное меню."""
     router = Router(name="common")
     router.message.register(handle_start, Command("start"))
     router.message.register(handle_help, Command("help"))
-    router.callback_query.register(handle_menu_callback, F.data.in_(MENU_CALLBACKS))
+    router.callback_query.register(show_main_menu, NavMainCB.filter())
+    router.callback_query.register(show_main_menu, FlowCancelCB.filter())
     return router
+
+
+__all__ = ["HELP_TEXT", "START_TEXT", "build_router", "handle_help", "handle_start"]

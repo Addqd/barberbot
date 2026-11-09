@@ -8,7 +8,7 @@ dependencies = [
     "apscheduler>=3.11,<4",
     "psycopg[binary]>=3.3.8",
     "pydantic-settings>=2.16.2",
-    "sqlalchemy>=2.1.8",
+    "sqlalchemy[asyncio]>=2.1.8",
 ]
 
 [dependency-groups]

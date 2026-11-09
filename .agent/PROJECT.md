@@ -74,6 +74,154 @@ locations unless the user changes the scope.
   that records Bot API method objects. No network, no Telegram, no PostgreSQL.
 - No database models, migrations, FSM, webhook or extra dependencies in TASK 001.
 
+## Confirmed architecture — GROUP II (ORM, data layer, booking engine)
+
+- Schema ownership stays with Alembic (`alembic/versions/0001_initial_schema`).
+  `metadata.create_all()` / `drop_all()` are never used in application code.
+  `alembic/env.py` now exposes `target_metadata = Base.metadata` so a future,
+  explicitly authorized autogenerate can compare models with the database;
+  autogenerate was not invoked and no migration was added or edited.
+- The PostgreSQL exclusion constraint `ex_bookings_barber_no_overlap` is the
+  final safeguard against double booking. It is declared in ORM metadata for
+  completeness but remains migration-owned. SQLSTATE `23P01` is translated into
+  the domain error `SlotUnavailable` after the transaction rollback.
+- Typed SQLAlchemy 2.x ORM in `barberbot/db/models.py` mirrors all seven tables,
+  including column types, PKs, named unique/check constraints, indexes, FKs and
+  relationships. Status columns are `StrEnum` values stored in `VARCHAR(16)`
+  ("confirmed/cancelled/completed", "pending/sent/failed/cancelled") without a
+  PostgreSQL enum type, matching the existing check constraints.
+- `barberbot/db/engine.py` builds one `AsyncEngine` (Psycopg 3, `pool_pre_ping`,
+  `hide_parameters`) and an `async_sessionmaker(expire_on_commit=False)`.
+  Connection settings come from `barberbot/db_settings.py` + `.env`; credentials
+  are never duplicated in code. The caller owns the engine lifecycle and must
+  call `Database.dispose()` on shutdown (wiring into the bot runtime is GROUP III).
+- Data access is a thin repository layer in `barberbot/db/repositories.py`
+  (`UserRepository`, `CatalogRepository`, `ScheduleRepository`,
+  `BookingRepository`). Repositories receive an `AsyncSession`; there is no
+  Unit of Work or abstract interface layer.
+- `barberbot/booking/service.py` owns business rules and creates one
+  `AsyncSession` per operation, using `async with session.begin()` for writes.
+  `create_booking()` is a single atomic transaction: the booking insert and the
+  detail reload (`get_with_details`) happen inside the same `begin()` block, so a
+  failed reload rolls back the insert and the caller gets `DatabaseUnavailable`
+  instead of a phantom committed booking. Pure slot rules live in
+  `barberbot/booking/slots.py` and are unit-tested without a database.
+- Booking policy (enforced in the service, not the schema): 30-minute start
+  grid, Mon–Fri working hours from `barber_working_hours`, service duration from
+  `services`, `Europe/Moscow` via `zoneinfo` (`tzdata` on Windows), no past
+  starts, half-open `[start, end)` intervals, `barber_time_off` respected,
+  cancellation allowed only by the owner and no later than 2 hours before start.
+- Domain errors in `barberbot/booking/errors.py` are distinct and contain only
+  Russian user-facing text: no SQL, DSN, credentials or DB internals.
+- Windows 10 requires `SelectorEventLoop` for Psycopg async. `barberbot/__main__.py`
+  passes it to `asyncio.run`, and `tests/conftest.py` provides it through
+  `pytest_asyncio_loop_factories`.
+- Integration tests run against `<POSTGRES_DB>_test` only. The `database` fixture
+  verifies `current_database()` before yielding and fails hard on mismatch.
+  Test rows use unique `__test_...` names / negative Telegram IDs and are deleted
+  by a factory fixture; seeded demo data is never modified.
+- Concurrency is tested with independent sessions/connections: two simultaneous
+  requests for one slot (exactly one success), direct overlapping inserts
+  (one `23P01`), and different barbers at the same time (both succeed).
+- `reminders` is mapped as ORM but reminder scheduling/delivery is not
+  implemented; Telegram FSM booking stays in GROUP III.
+
+## Confirmed architecture — GROUP III (client Telegram UI)
+
+- The client UI is implemented in `barberbot/handlers/`: `common.py` (commands,
+  main menu), `services.py` (catalog), `booking.py` (FSM scenario),
+  `my_bookings.py` (list/card/cancel), `fallback.py` (stale/unknown callbacks),
+  `render.py` (edit-or-send helper), and the router order in `__init__.py`
+  (fallback last).
+- Presentation is separated from the booking engine: `callbacks.py` (typed
+  `CallbackData`), `fsm.py` (`BookingFlow`, safe parsing of FSM data),
+  `ui.py` (Moscow formatting, statuses, display sorting, UI-only cancel
+  eligibility), `messages.py` (Russian texts), `keyboards.py` (all keyboards).
+- `BookingService` remains the single source of booking rules. GROUP III only
+  added two read-only methods, `list_active_services()` and
+  `list_active_barbers()`; slot calculation, creation, listing and cancellation
+  are unchanged. Handlers never compute availability themselves.
+- Callback data is untrusted: no Telegram ID is carried inside it. The user is
+  always identified by `event.from_user.id`. Typed `CallbackData.filter()`
+  rejects bad prefixes/fields/types; `StateFilter` binds each button to its FSM
+  step; a final catch-all callback handler answers every stale/unknown press so
+  no spinner is left. Service IDs, barber IDs, dates and times from callbacks
+  are re-checked against fresh DB data before use, and `create_booking()`
+  revalidates everything again (exclusion constraint is the final guard).
+- Booking flow states: `service → barber → date → time → confirm`. Dates are
+  refetched on every page/step (horizon owned by the service), paginated 6 per
+  page; time is passed as a Unix timestamp and re-checked against
+  `available_slots()`; the day is stored as an ISO date. `START_AT` is stored as
+  an ISO datetime with timezone, and the final handler verifies that its Moscow
+  date equals the selected day.
+- FSM uses aiogram's default in-memory storage (no Redis). State loss is
+  tolerated: handlers validate FSM data and restart the scenario with a clear
+  message. `/start` clears the state; going back resets dependent keys by
+  `state.set_data(...)` at each step.
+- Cancellation UI is hint-only: `ui.is_cancellable()` (real clock, status
+  `confirmed`, at least 2 hours before start) decides whether to show the
+  button, but `BookingService.cancel_booking()` is authoritative. The handler
+  also pre-checks status/deadline for clean messages; ownership is enforced by
+  looking the booking up in the user's own list and again by the service.
+- Double “Подтвердить” is prevented by `StateFilter` (state is cleared after
+  success) plus `SimpleEventIsolation` on the dispatcher, which serializes
+  updates of the same chat. The PostgreSQL exclusion constraint remains the
+  final protection against two bookings for one slot.
+- Dependency injection/lifecycle: `build_dispatcher(booking_service)` stores the
+  service in `Dispatcher.workflow_data`; handlers receive it by argument name.
+  `run_bot()` creates one `Database` per process, builds `BookingService` from
+  its session factory, and disposes the engine and closes the Telegram session
+  in `finally`, including startup failures. Migrations are never run on bot
+  start. `SelectorEventLoop` on Windows is unchanged.
+- Tests: `FakeSession` now records `EditMessageText` as well; navigation/command
+  tests use `tests/fakes.py::FakeBookingService` without a database. Critical
+  flows run through a real `Dispatcher.feed_update` with the real
+  `BookingService` against `barberbot_test` only. No Telegram network calls.
+
+## Confirmed architecture — automatic booking completion
+
+- A `confirmed` booking whose service has already ended (`ends_at <= now`,
+  timezone-aware) is moved to `completed`. `cancelled` and `completed` rows and
+  not-yet-ended `confirmed` rows are never touched. The boundary is inclusive.
+- The status change is a single SQL `UPDATE`
+  (`WHERE status = 'confirmed' AND ends_at <= now`) executed through the
+  existing repository + service layer (`BookingRepository.complete_finished()`,
+  `BookingService.complete_finished_bookings()`). PostgreSQL row locking makes
+  concurrent runs conflict-free and idempotent; there is no new migration and
+  no schema change.
+- Scheduling uses the already installed APScheduler 3.x
+  (`barberbot/booking/completion.py`, `CompletionScheduler`): the scheduling
+  loop is one interval job (1 minute, `coalesce=True`, `max_instances=1`), not a
+  separate background-task system. The same class performs one sweep at start,
+  so bookings that ended during downtime are completed after a restart.
+- Lifecycle: `build_dispatcher()` creates the scheduler and keeps it in
+  `workflow_data`; `on_startup` performs the first sweep and starts the
+  interval, `on_shutdown` stops it. aiogram emits shutdown in a `finally`, so
+  the job is stopped on normal stop and on polling errors as well.
+- A temporary database error (`DatabaseUnavailable`) is logged as a warning and
+  does not stop the scheduler: the next interval retries. Domain messages stay
+  free of SQL/DSN details.
+- Booking, cancellation, listing, slot protection and the exclusion constraint
+  are unchanged: `completed` remains an active status for slot occupancy.
+
+## Confirmed architecture — private chats only (security fix)
+
+- Client features (catalog, FSM booking, my bookings, cancellation, navigation)
+  are reachable only from Telegram `private` chats. The single boundary is
+  `PrivateChatOnlyMiddleware` (`barberbot/middleware.py`) registered in
+  `build_dispatcher()` as `dispatcher.update.outer_middleware(...)`, so it runs
+  for every update before filters, handlers and any `BookingService` call.
+- Chat type comes only from Telegram chat context (`chat.type`), never from
+  `from_user.id`. Messages/edited messages from `group`/`supergroup` (and other
+  non-private chats) are ignored. Callback queries from non-private chats are
+  stopped and answered with `PRIVATE_CHAT_ONLY` (`show_alert=True`) so no
+  spinner is left and no personal data is published.
+- Fail closed: a callback without an accessible `message` (inline mode) or with
+  an undeterminable chat is rejected. `InaccessibleMessage` carries `chat`, so
+  it is checked like a regular message; private+inaccessible still works.
+- Business rules, booking algorithms, FSM, keys, schema, migrations, scheduler
+  and existing handlers are unchanged; only the update boundary was added.
+
 ## Environment note
 
 - On the development machine direct TCP access to `api.telegram.org:443` is
