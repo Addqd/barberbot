@@ -175,8 +175,10 @@ FORGED_CALLBACKS = [
     admin_cb.AdminScheduleCB(barber_id=1).pack(),
     admin_cb.AdminWeekdayCB(barber_id=1, weekday=0).pack(),
     admin_cb.AdminTimeOffCB(barber_id=1).pack(),
+    admin_cb.AdminTimeOffCB(barber_id=1, page=1).pack(),
     admin_cb.AdminTimeOffAddCB(barber_id=1).pack(),
     admin_cb.AdminTimeOffRemoveCB(barber_id=1, time_off_id=1).pack(),
+    admin_cb.AdminTimeOffRemoveCB(barber_id=1, time_off_id=1, page=1).pack(),
     admin_cb.AdminBookingsCB(page=0).pack(),
     admin_cb.AdminBookingCB(booking_id=1).pack(),
     admin_cb.AdminBookingCancelCB(booking_id=1).pack(),
@@ -206,8 +208,23 @@ async def test_forged_admin_callback_is_denied(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "packed",
-    ["adm_panel:1:2", "adm_services", "adm_service:x", "adm_service_edit:1:size"],
-    ids=["extra-field", "missing-field", "bad-type", "bad-field"],
+    [
+        "adm_panel:1:2",
+        "adm_services",
+        "adm_service:x",
+        "adm_service_edit:1:size",
+        # Старый формат без страницы: у пагинируемого раздела полей больше.
+        "adm_timeoff:1",
+        "adm_timeoff_remove:1:1",
+    ],
+    ids=[
+        "extra-field",
+        "missing-field",
+        "bad-type",
+        "bad-field",
+        "timeoff",
+        "timeoff-remove",
+    ],
 )
 async def test_malformed_admin_callback_goes_to_fallback(
     strict_dispatcher: Dispatcher, bot: Bot, fake_session: FakeSession, packed: str

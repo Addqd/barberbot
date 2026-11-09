@@ -198,7 +198,9 @@ def time_off_keyboard(
         [
             _button(
                 texts.time_off_button_label(row),
-                admin_cb.AdminTimeOffRemoveCB(barber_id=barber_id, time_off_id=row.id),
+                admin_cb.AdminTimeOffRemoveCB(
+                    barber_id=barber_id, time_off_id=row.id, page=page
+                ),
             )
         ]
         for row in rows
@@ -207,7 +209,9 @@ def time_off_keyboard(
         inline_keyboard=[
             *buttons,
             *_arrows(
-                page, pages, lambda value: admin_cb.AdminTimeOffCB(barber_id=barber_id)
+                page,
+                pages,
+                lambda value: admin_cb.AdminTimeOffCB(barber_id=barber_id, page=value),
             ),
             [
                 _button(

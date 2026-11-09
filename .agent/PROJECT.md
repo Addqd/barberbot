@@ -258,11 +258,13 @@ locations unless the user changes the scope.
   except ``barber_time_off`` rows (an exclusion, not a service/barber/booking).
 - Schedule and time-off edits are rejected with ``AdminConflict`` (message lists
   the future confirmed bookings) when they would invalidate existing future
-  bookings; the admin cancels those bookings first. Known residual race: a
-  client booking created concurrently in the same instant is validated against
-  the pre-change schedule; the PostgreSQL exclusion constraint still prevents
-  double booking, and the admin transaction re-checks conflicts under a barber
-  row lock.
+  bookings; the admin cancels those bookings first. Concurrent bookings cannot
+  invalidate the check: `BookingService.create_booking()` locks the barber row
+  (`SELECT … FOR UPDATE`) and then the service row **before** the final
+  availability re-check + insert, in one transaction, and every admin
+  schedule/time-off/barber-status edit holds the same barber row lock until its
+  own commit. The PostgreSQL exclusion constraint stays the last line of defence
+  against double booking.
 - Admin cancellation intentionally bypasses the 2-hour client rule but still
   requires an explicit confirmation step; status is re-read under
   ``SELECT ... FOR UPDATE``, so repeated or parallel cancels yield exactly one

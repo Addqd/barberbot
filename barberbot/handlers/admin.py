@@ -766,6 +766,7 @@ async def show_time_off(
         result = await admin_service.list_time_off(
             actor_telegram_id=_actor(callback),
             barber_id=callback_data.barber_id,
+            page=callback_data.page,
         )
     except AdminError as error:
         await _fail(callback, state, error)
@@ -868,7 +869,9 @@ async def remove_time_off(
             time_off_id=callback_data.time_off_id,
         )
         result = await admin_service.list_time_off(
-            actor_telegram_id=actor, barber_id=callback_data.barber_id
+            actor_telegram_id=actor,
+            barber_id=callback_data.barber_id,
+            page=callback_data.page,
         )
     except AdminError as error:
         await _fail(callback, state, error)

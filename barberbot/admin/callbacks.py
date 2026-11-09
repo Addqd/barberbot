@@ -87,9 +87,14 @@ class AdminWeekdayCB(CallbackData, prefix="adm_weekday"):
 
 
 class AdminTimeOffCB(CallbackData, prefix="adm_timeoff"):
-    """Список отсутствий мастера."""
+    """Список отсутствий мастера.
+
+    ``page`` по умолчанию равна 0: кнопки без явной страницы (карточка
+    мастера, возврат из формы) продолжают открывать первую страницу.
+    """
 
     barber_id: int
+    page: int = 0
 
 
 class AdminTimeOffAddCB(CallbackData, prefix="adm_timeoff_add"):
@@ -99,10 +104,15 @@ class AdminTimeOffAddCB(CallbackData, prefix="adm_timeoff_add"):
 
 
 class AdminTimeOffRemoveCB(CallbackData, prefix="adm_timeoff_remove"):
-    """Удалить период отсутствия."""
+    """Удалить период отсутствия.
+
+    ``page`` — страница списка, с которой нажата кнопка: после удаления
+    администратор остаётся на ней (или на предыдущей, если она опустела).
+    """
 
     barber_id: int
     time_off_id: int
+    page: int = 0
 
 
 class AdminBookingsCB(CallbackData, prefix="adm_bookings"):

@@ -25,7 +25,7 @@ from barberbot.app import build_dispatcher
 from barberbot.booking.service import BookingService
 from barberbot.booking.slots import MOSCOW
 from barberbot.db.models import Booking, BookingStatus, Service
-from barberbot.messages import PRIVATE_CHAT_ONLY
+from barberbot.messages import PRIVATE_CHAT_ONLY, STALE_CALLBACK
 
 from .chat import Chat
 from .conftest import (
@@ -106,6 +106,18 @@ def _last_keyboard_buttons(session: FakeSession) -> list[str | None]:
             for button in row
         ]
     raise AssertionError("Бот не отправил сообщение с клавиатурой")
+
+
+async def add_time_off_rows(factory: Any, barber_id: int, count: int) -> list[Any]:
+    """Создать ``count`` непересекающихся минутных периодов отсутствия."""
+    return [
+        await factory.time_off(
+            barber_id=barber_id,
+            starts_at=at(10, 0, day=8 + offset),
+            ends_at=at(12, 0, day=8 + offset),
+        )
+        for offset in range(count)
+    ]
 
 
 async def page_of_service(admin_service: AdminService, service_id: int) -> int:
@@ -323,6 +335,138 @@ async def test_time_off_flow(
         actor_telegram_id=ADMIN_ID, barber_id=barber.id
     )
     assert rows.rows == []
+
+
+@pytest.mark.asyncio
+async def test_time_off_pagination_next_and_previous(
+    admin_chat: Chat, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = await add_time_off_rows(factory, barber.id, 7)
+    first_page = admin_cb.AdminTimeOffCB(barber_id=barber.id, page=0).pack()
+    second_page = admin_cb.AdminTimeOffCB(barber_id=barber.id, page=1).pack()
+
+    await admin_chat.press(admin_cb.AdminPanelCB().pack())
+    await admin_chat.press(first_page)
+
+    assert "Страница 1 из 2." in admin_chat.text
+    assert admin_texts.time_off_period(rows[0]) in admin_chat.text
+    assert admin_texts.time_off_period(rows[5]) not in admin_chat.text
+    assert second_page in last_keyboard(admin_chat.session)
+    # На первой странице нет кнопки «◀️»: предыдущей страницы не существует.
+    assert admin_cb.AdminTimeOffCB(barber_id=barber.id, page=-1).pack() not in (
+        last_keyboard(admin_chat.session)
+    )
+
+    await admin_chat.press(second_page)
+
+    assert "Страница 2 из 2." in admin_chat.text
+    assert admin_texts.time_off_period(rows[5]) in admin_chat.text
+    assert admin_texts.time_off_period(rows[6]) in admin_chat.text
+    assert admin_texts.time_off_period(rows[0]) not in admin_chat.text
+    assert first_page in last_keyboard(admin_chat.session)
+    # На последней странице нет кнопки «◀️»... то есть «▶️».
+    assert admin_cb.AdminTimeOffCB(barber_id=barber.id, page=2).pack() not in (
+        last_keyboard(admin_chat.session)
+    )
+
+    await admin_chat.press(first_page)
+
+    assert "Страница 1 из 2." in admin_chat.text
+    assert admin_texts.time_off_period(rows[0]) in admin_chat.text
+
+
+@pytest.mark.asyncio
+async def test_time_off_keyboard_remove_buttons_carry_current_page(
+    admin_chat: Chat, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = await add_time_off_rows(factory, barber.id, 6)
+
+    await admin_chat.press(admin_cb.AdminTimeOffCB(barber_id=barber.id, page=1).pack())
+
+    assert "Страница 2 из 2." in admin_chat.text
+    assert admin_cb.AdminTimeOffRemoveCB(
+        barber_id=barber.id, time_off_id=rows[5].id, page=1
+    ).pack() in last_keyboard(admin_chat.session)
+
+
+@pytest.mark.asyncio
+async def test_removing_last_row_of_last_page_shows_previous_page(
+    admin_chat: Chat, admin_service: AdminService, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = await add_time_off_rows(factory, barber.id, 6)
+
+    await admin_chat.press(admin_cb.AdminTimeOffCB(barber_id=barber.id, page=1).pack())
+    assert "Страница 2 из 2." in admin_chat.text
+
+    await admin_chat.press(
+        admin_cb.AdminTimeOffRemoveCB(
+            barber_id=barber.id, time_off_id=rows[5].id, page=1
+        ).pack()
+    )
+
+    assert alert_text(admin_chat.session) == admin_texts.NOTE_TIME_OFF_REMOVED
+    # Последняя страница опустела: показывается предыдущая (теперь единственная).
+    assert "Страница 2 из 2." not in admin_chat.text
+    assert all(admin_texts.time_off_period(row) in admin_chat.text for row in rows[:5])
+    assert admin_texts.time_off_period(rows[5]) not in admin_chat.text
+    page = await admin_service.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id
+    )
+    assert (page.total, page.page.pages) == (5, 1)
+
+
+@pytest.mark.asyncio
+async def test_removing_last_period_shows_empty_state(
+    admin_chat: Chat, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = await add_time_off_rows(factory, barber.id, 1)
+
+    await admin_chat.press(admin_cb.AdminTimeOffCB(barber_id=barber.id).pack())
+    await admin_chat.press(
+        admin_cb.AdminTimeOffRemoveCB(
+            barber_id=barber.id, time_off_id=rows[0].id
+        ).pack()
+    )
+
+    assert "Периодов отсутствия нет." in admin_chat.text
+    assert admin_texts.time_off_period(rows[0]) not in admin_chat.text
+
+
+@pytest.mark.asyncio
+async def test_time_off_page_default_and_legacy_callback(
+    admin_chat: Chat, factory: Any
+) -> None:
+    barber = await factory.barber()
+    await add_time_off_rows(factory, barber.id, 1)
+
+    # Кнопки без явной страницы продолжают открывать первую страницу.
+    await admin_chat.press(admin_cb.AdminTimeOffCB(barber_id=barber.id).pack())
+    assert admin_chat.text.startswith("🚫 Отсутствия")
+
+    admin_chat.reset()
+    # Старый callback без поля page не ломает бота: его разбирает fallback.
+    await admin_chat.press(f"adm_timeoff:{barber.id}")
+
+    assert alert_text(admin_chat.session) == STALE_CALLBACK
+    assert edited_messages(admin_chat.session) == []
+
+
+@pytest.mark.asyncio
+async def test_regular_user_cannot_open_time_off_page(
+    panel: Dispatcher, bot: Bot, fake_session: FakeSession, factory: Any
+) -> None:
+    barber = await factory.barber()
+    await add_time_off_rows(factory, barber.id, 6)
+    chat = Chat(panel, bot, fake_session, user_id=OTHER_ID)
+
+    await chat.press(admin_cb.AdminTimeOffCB(barber_id=barber.id, page=1).pack())
+
+    assert alert_text(fake_session) == admin_texts.ACCESS_DENIED
+    assert edited_messages(fake_session) == []
 
 
 # --------------------------------------------------------------------------- #

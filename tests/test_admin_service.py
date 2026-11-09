@@ -559,6 +559,75 @@ async def test_time_off_removal_is_not_repeatable(
 
 
 @pytest.mark.asyncio
+async def test_time_off_pagination_returns_requested_page(
+    admin: AdminService, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = [
+        await factory.time_off(
+            barber_id=barber.id,
+            starts_at=at(10, 0, day=8 + offset),
+            ends_at=at(12, 0, day=8 + offset),
+        )
+        for offset in range(7)
+    ]
+
+    first = await admin.list_time_off(actor_telegram_id=ADMIN_ID, barber_id=barber.id)
+    assert (first.total, first.page.number, first.page.pages) == (7, 0, 2)
+    assert [row.id for row in first.rows] == [row.id for row in rows[:5]]
+
+    second = await admin.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, page=1
+    )
+    assert (second.page.number, second.page.pages) == (1, 2)
+    assert [row.id for row in second.rows] == [row.id for row in rows[5:]]
+
+    clamped = await admin.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, page=99
+    )
+    assert clamped.page.number == 1
+    assert [row.id for row in clamped.rows] == [row.id for row in rows[5:]]
+
+    negative = await admin.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, page=-3
+    )
+    assert negative.page.number == 0
+    assert [row.id for row in negative.rows] == [row.id for row in rows[:5]]
+
+
+@pytest.mark.asyncio
+async def test_removing_last_row_of_last_page_returns_previous_page(
+    admin: AdminService, factory: Any
+) -> None:
+    barber = await factory.barber()
+    rows = [
+        await factory.time_off(
+            barber_id=barber.id,
+            starts_at=at(10, 0, day=8 + offset),
+            ends_at=at(12, 0, day=8 + offset),
+        )
+        for offset in range(6)
+    ]
+
+    last = await admin.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, page=1
+    )
+    assert [row.id for row in last.rows] == [rows[5].id]
+
+    await admin.remove_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, time_off_id=rows[5].id
+    )
+
+    # Обработчик повторяет запрос с той же страницей: пустая страница
+    # ограничивается последней непустой.
+    after = await admin.list_time_off(
+        actor_telegram_id=ADMIN_ID, barber_id=barber.id, page=1
+    )
+    assert (after.total, after.page.number, after.page.pages) == (5, 0, 1)
+    assert [row.id for row in after.rows] == [row.id for row in rows[:5]]
+
+
+@pytest.mark.asyncio
 async def test_time_off_conflicting_with_booking_is_rejected(
     admin: AdminService, factory: Any, booking_service: BookingService
 ) -> None:

@@ -7,6 +7,14 @@
 Защита от пересекающихся записей обеспечивается PostgreSQL exclusion
 constraint ``ex_bookings_barber_no_overlap``: при SQLSTATE ``23P01`` транзакция
 откатывается, а вызывающий код получает доменный ``SlotUnavailable``.
+
+Гонка с административными изменениями расписания, отсутствий и условий
+услуги устраняется блокировками строк: ``create_booking()`` получает
+``SELECT ... FOR UPDATE`` на строке мастера, затем на строке услуги и только
+после этого проверяет доступность и вставляет запись — всё в одной
+транзакции. Порядок «мастер → услуга» един для всего проекта; административные
+операции блокируют не более одной из этих строк, поэтому взаимных ожиданий
+(deadlock) не возникает.
 """
 
 from __future__ import annotations
@@ -169,40 +177,60 @@ class BookingService:
         now = self._now()
         local_day = starts_at.astimezone(self._tz).date()
 
-        # Сначала проверяем услугу, мастера и время: для недопустимого запроса
-        # ничего не пишется в базу.
+        # 1. Предварительная проверка без блокировок: недопустимый запрос не
+        #    пишет в базу даже пользователя. Авторитетной она не является —
+        #    условия могут измениться до вставки записи.
         async with self._operation() as session:
             service = await self._require_service(session, service_id)
             barber = await self._require_barber(session, barber_id)
             availability = await self._availability(
                 session, service=service, barber=barber, days=[local_day], now=now
             )
-            duration = timedelta(minutes=service.duration_minutes)
             self._validate_start(
                 starts_at=starts_at,
-                duration=duration,
+                duration=timedelta(minutes=service.duration_minutes),
                 day_state=availability[local_day],
                 now=now,
             )
-            barber_pk = barber.id
-            service_pk = service.id
-            price_rub = service.price_rub
-            duration_minutes = service.duration_minutes
 
         user = await self._ensure_user(telegram_id, display_name)
 
+        # 2. Единственная авторитетная транзакция. Порядок блокировок
+        #    фиксирован: сначала строка мастера, затем строка услуги.
+        #    Административные операции блокируют не более одной из этих
+        #    строк, поэтому циклических ожиданий не возникает.
         async with self._operation() as session:
+            catalog = CatalogRepository(session)
             repository = BookingRepository(session)
             try:
                 async with session.begin():
+                    barber_row = await self._lock_barber(catalog, barber_id)
+                    service_row = await self._lock_service(catalog, service_id)
+                    # Условия читаются заново под блокировками: отключение
+                    # услуги/мастера и смена длительности не могут пройти
+                    # незамеченными.
+                    duration_row = timedelta(minutes=service_row.duration_minutes)
+                    availability = await self._availability(
+                        session,
+                        service=service_row,
+                        barber=barber_row,
+                        days=[local_day],
+                        now=now,
+                    )
+                    self._validate_start(
+                        starts_at=starts_at,
+                        duration=duration_row,
+                        day_state=availability[local_day],
+                        now=now,
+                    )
                     created = await repository.create(
                         user_id=user.id,
-                        barber_id=barber_pk,
-                        service_id=service_pk,
+                        barber_id=barber_row.id,
+                        service_id=service_row.id,
                         starts_at=starts_at,
-                        ends_at=starts_at + duration,
-                        price_rub=price_rub,
-                        duration_minutes=duration_minutes,
+                        ends_at=starts_at + duration_row,
+                        price_rub=service_row.price_rub,
+                        duration_minutes=service_row.duration_minutes,
                     )
                     # Детали загружаются в этой же транзакции: если чтение не
                     # удалось, откатывается и сама запись.
@@ -336,6 +364,31 @@ class BookingService:
         if barber is None or not barber.is_active:
             raise BarberUnavailable(MESSAGE_BARBER_UNAVAILABLE)
         return barber
+
+    async def _lock_barber(self, catalog: CatalogRepository, barber_id: int) -> Barber:
+        """Мастер под ``SELECT … FOR UPDATE`` — первая блокировка транзакции.
+
+        Блокировка строки мастера сериализует бронирования с административными
+        правками расписания, отсутствий и статуса мастера: обе стороны не
+        могут одновременно изменить условия и проверить их.
+        """
+        barber = await catalog.get_barber_for_update(barber_id)
+        if barber is None or not barber.is_active:
+            raise BarberUnavailable(MESSAGE_BARBER_UNAVAILABLE)
+        return barber
+
+    async def _lock_service(
+        self, catalog: CatalogRepository, service_id: int
+    ) -> Service:
+        """Услуга под ``SELECT … FOR UPDATE`` — вторая блокировка транзакции.
+
+        Длительность, цена и доступность услуги читаются после блокировки,
+        поэтому запись не создаётся по устаревшим параметрам.
+        """
+        service = await catalog.get_service_for_update(service_id)
+        if service is None or not service.is_active:
+            raise ServiceUnavailable(MESSAGE_SERVICE_UNAVAILABLE)
+        return service
 
     async def _availability(
         self,
