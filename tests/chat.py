@@ -62,6 +62,17 @@ class Chat:
         )
         await self.dispatcher.feed_update(self.bot, update)
 
+    async def type(self, text: str) -> None:
+        """Отправить обычный текст без command-энтити (ввод формы)."""
+        self._update_id += 1
+        payload = message_payload(text, user_id=self.user_id)
+        payload.pop("entities", None)
+        update = build_update(
+            self.bot,
+            {"update_id": self._update_id, "message": payload},
+        )
+        await self.dispatcher.feed_update(self.bot, update)
+
     @property
     def text(self) -> str:
         return last_text(self.session)

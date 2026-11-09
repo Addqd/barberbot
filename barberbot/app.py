@@ -9,6 +9,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import ErrorEvent, Message
 
+from barberbot.admin.service import AdminService
 from barberbot.booking.completion import CompletionScheduler
 from barberbot.booking.service import BookingService
 from barberbot.config import Settings
@@ -49,27 +50,37 @@ async def on_error(event: ErrorEvent) -> bool:
     return True
 
 
-def build_dispatcher(booking_service: BookingService) -> Dispatcher:
-    """Создать dispatcher с роутерами, DI сервиса и обработчиком ошибок.
+def build_dispatcher(
+    booking_service: BookingService,
+    admin_service: AdminService | None = None,
+) -> Dispatcher:
+    """Создать dispatcher с роутерами, DI сервисов и обработчиком ошибок.
 
-    ``booking_service`` попадает в ``workflow_data`` aiogram и передаётся
-    обработчикам по имени аргумента. ``SimpleEventIsolation`` сериализует
-    обновления одного чата: повторное нажатие «Подтвердить» не выполняется
-    параллельно с первым. ``CompletionScheduler`` тоже живёт в
+    ``booking_service`` и ``admin_service`` попадают в ``workflow_data`` aiogram
+    и передаются обработчикам по имени аргумента. ``SimpleEventIsolation``
+    сериализует обновления одного чата: повторное нажатие «Подтвердить» не
+    выполняется параллельно с первым. ``CompletionScheduler`` тоже живёт в
     ``workflow_data``: его запускает ``on_startup``, останавливает
     ``on_shutdown``, который aiogram вызывает и при ошибке polling.
 
+    Список администраторов берётся только из ``AdminService`` — единого
+    источника истины. Без сервиса список пуст, а guard-мидлварь админ-панели
+    запрещает любые административные действия (**fail closed**).
+
     ``PrivateChatOnlyMiddleware`` регистрируется первым уровнем обработки
-    updates: клиентские функции доступны только в личных чатах, проверка
-    выполняется до фильтров, обработчиков и обращения к сервису.
+    updates: все функции доступны только в личных чатах, проверка выполняется
+    до фильтров, обработчиков и обращения к сервисам.
     """
+    admin_ids = admin_service.admin_ids if admin_service is not None else frozenset()
     dispatcher = Dispatcher(
         booking_service=booking_service,
+        admin_service=admin_service,
+        admin_ids=admin_ids,
         completion_scheduler=CompletionScheduler(booking_service),
         events_isolation=SimpleEventIsolation(),
     )
     dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware())
-    dispatcher.include_router(build_main_router())
+    dispatcher.include_router(build_main_router(admin_ids))
     dispatcher.startup.register(on_startup)
     dispatcher.shutdown.register(on_shutdown)
     dispatcher.errors.register(on_error)
@@ -87,7 +98,10 @@ async def run_bot(settings: Settings) -> None:
     database: Database | None = None
     try:
         database = create_database()
-        dispatcher = build_dispatcher(BookingService(database.sessions))
+        admin_service = AdminService(
+            database.sessions, admin_ids=settings.admin_telegram_ids
+        )
+        dispatcher = build_dispatcher(BookingService(database.sessions), admin_service)
         logger.info("Подключение к Telegram API и запуск polling")
         await dispatcher.start_polling(bot, close_bot_session=False)
     finally:

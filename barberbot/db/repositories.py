@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, time
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql.elements import ColumnElement
 
 from barberbot.db.models import (
     ACTIVE_BOOKING_STATUSES,
@@ -86,8 +87,66 @@ class CatalogRepository:
     async def get_service(self, service_id: int) -> Service | None:
         return await self._session.get(Service, service_id)
 
+    async def get_service_for_update(self, service_id: int) -> Service | None:
+        """Услуга с блокировкой строки на время правки."""
+        result = await self._session.execute(
+            select(Service).where(Service.id == service_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_barber(self, barber_id: int) -> Barber | None:
         return await self._session.get(Barber, barber_id)
+
+    async def list_services(self) -> Sequence[Service]:
+        """Все услуги, включая отключённые (админ-панель)."""
+        result = await self._session.execute(select(Service).order_by(Service.id))
+        return result.scalars().all()
+
+    async def list_barbers(self) -> Sequence[Barber]:
+        """Все мастера, включая отключённых (админ-панель)."""
+        result = await self._session.execute(select(Barber).order_by(Barber.id))
+        return result.scalars().all()
+
+    async def get_service_by_name(self, name: str) -> Service | None:
+        result = await self._session.execute(
+            select(Service).where(Service.name == name)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_barber_by_name(self, name: str) -> Barber | None:
+        result = await self._session.execute(select(Barber).where(Barber.name == name))
+        return result.scalar_one_or_none()
+
+    async def get_barber_for_update(self, barber_id: int) -> Barber | None:
+        """Мастер с блокировкой строки: сериализует правки расписания."""
+        result = await self._session.execute(
+            select(Barber).where(Barber.id == barber_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def create_service(
+        self,
+        *,
+        name: str,
+        price_rub: int,
+        duration_minutes: int,
+        is_active: bool = True,
+    ) -> Service:
+        service = Service(
+            name=name,
+            price_rub=price_rub,
+            duration_minutes=duration_minutes,
+            is_active=is_active,
+        )
+        self._session.add(service)
+        await self._session.flush()
+        return service
+
+    async def create_barber(self, *, name: str, is_active: bool = False) -> Barber:
+        barber = Barber(name=name, is_active=is_active)
+        self._session.add(barber)
+        await self._session.flush()
+        return barber
 
 
 class ScheduleRepository:
@@ -129,6 +188,85 @@ class ScheduleRepository:
             .order_by(BarberTimeOff.starts_at)
         )
         return result.scalars().all()
+
+    async def list_hours_for_barbers(
+        self, barber_ids: Sequence[int]
+    ) -> Sequence[BarberWorkingHours]:
+        """Недельный график сразу для нескольких мастеров."""
+        if not barber_ids:
+            return []
+        result = await self._session.execute(
+            select(BarberWorkingHours)
+            .where(BarberWorkingHours.barber_id.in_(barber_ids))
+            .order_by(BarberWorkingHours.barber_id, BarberWorkingHours.weekday)
+        )
+        return result.scalars().all()
+
+    async def list_all_time_off(self, barber_id: int) -> Sequence[BarberTimeOff]:
+        """Все периоды отсутствия мастера, начиная с самого раннего."""
+        result = await self._session.execute(
+            select(BarberTimeOff)
+            .where(BarberTimeOff.barber_id == barber_id)
+            .order_by(BarberTimeOff.starts_at)
+        )
+        return result.scalars().all()
+
+    async def get_time_off_for_update(self, time_off_id: int) -> BarberTimeOff | None:
+        """Период отсутствия с блокировкой строки (защита от двойного удаления)."""
+        result = await self._session.execute(
+            select(BarberTimeOff)
+            .where(BarberTimeOff.id == time_off_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def set_working_hours(
+        self, *, barber_id: int, weekday: int, start_time: time, end_time: time
+    ) -> BarberWorkingHours:
+        """Создать или обновить рабочие часы дня недели (``uq_barber_weekday``)."""
+        existing = await self.get_working_hours(barber_id, weekday)
+        if existing is None:
+            row = BarberWorkingHours(
+                barber_id=barber_id,
+                weekday=weekday,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            self._session.add(row)
+            await self._session.flush()
+            return row
+        existing.start_time = start_time
+        existing.end_time = end_time
+        await self._session.flush()
+        return existing
+
+    async def delete_working_hours(self, barber_id: int, weekday: int) -> bool:
+        """Удалить рабочие часы дня недели. ``True`` — строка была удалена."""
+        row = await self.get_working_hours(barber_id, weekday)
+        if row is None:
+            return False
+        await self._session.delete(row)
+        await self._session.flush()
+        return True
+
+    async def add_time_off(
+        self,
+        *,
+        barber_id: int,
+        starts_at: datetime,
+        ends_at: datetime,
+        reason: str | None = None,
+    ) -> BarberTimeOff:
+        row = BarberTimeOff(
+            barber_id=barber_id, starts_at=starts_at, ends_at=ends_at, reason=reason
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def delete_time_off(self, row: BarberTimeOff) -> None:
+        await self._session.delete(row)
+        await self._session.flush()
 
 
 class BookingRepository:
@@ -236,6 +374,96 @@ class BookingRepository:
             statement = statement.where(Booking.status != BookingStatus.CANCELLED)
         result = await self._session.execute(statement)
         return result.scalars().all()
+
+    # ------------------------------------------------------------------ #
+    # Админ-панель
+    # ------------------------------------------------------------------ #
+
+    async def get_with_details_for_admin(self, booking_id: int) -> Booking | None:
+        """Запись с услугой, мастером и клиентом (карточка админ-панели)."""
+        result = await self._session.execute(
+            select(Booking)
+            .where(Booking.id == booking_id)
+            .options(
+                selectinload(Booking.barber),
+                selectinload(Booking.service),
+                selectinload(Booking.user),
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_future_confirmed_for_barber(
+        self, barber_id: int, *, after: datetime
+    ) -> Sequence[Booking]:
+        """Будущие подтверждённые записи мастера (проверка правок графика)."""
+        result = await self._session.execute(
+            select(Booking)
+            .where(
+                Booking.barber_id == barber_id,
+                Booking.status == BookingStatus.CONFIRMED,
+                Booking.starts_at > after,
+            )
+            .options(selectinload(Booking.service))
+            .order_by(Booking.starts_at)
+        )
+        return result.scalars().all()
+
+    async def list_for_admin(
+        self,
+        *,
+        window_start: datetime | None,
+        window_end: datetime | None,
+        barber_id: int | None,
+        limit: int,
+        offset: int,
+    ) -> Sequence[Booking]:
+        """Страница записей всех клиентов с фильтрами по дате и мастеру."""
+        statement = (
+            select(Booking)
+            .where(*_admin_booking_filters(window_start, window_end, barber_id))
+            .options(
+                selectinload(Booking.barber),
+                selectinload(Booking.service),
+                selectinload(Booking.user),
+            )
+            .order_by(Booking.starts_at.desc(), Booking.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self._session.execute(statement)
+        return result.scalars().all()
+
+    async def count_for_admin(
+        self,
+        *,
+        window_start: datetime | None,
+        window_end: datetime | None,
+        barber_id: int | None,
+    ) -> int:
+        """Общее количество записей под теми же фильтрами (для пагинации)."""
+        statement = (
+            select(func.count())
+            .select_from(Booking)
+            .where(*_admin_booking_filters(window_start, window_end, barber_id))
+        )
+        result = await self._session.execute(statement)
+        return result.scalar_one()
+
+
+def _admin_booking_filters(
+    window_start: datetime | None,
+    window_end: datetime | None,
+    barber_id: int | None,
+) -> list[ColumnElement[bool]]:
+    """Условия фильтрации списка записей админ-панели."""
+    filters: list[ColumnElement[bool]] = []
+    if window_start is not None:
+        filters.append(Booking.starts_at >= window_start)
+    if window_end is not None:
+        filters.append(Booking.starts_at < window_end)
+    if barber_id is not None:
+        filters.append(Booking.barber_id == barber_id)
+    return filters
 
 
 __all__ = [

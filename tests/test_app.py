@@ -13,7 +13,9 @@ from aiogram.types import ErrorEvent
 from pydantic import SecretStr
 
 from barberbot import app
+from barberbot.admin.service import AdminService
 from barberbot.app import ERROR_TEXT, build_dispatcher, on_error, run_bot
+from barberbot.booking.service import BookingService
 from barberbot.config import Settings
 
 from .conftest import NOW, TEST_BOT_TOKEN, TEST_CHAT_ID, FakeSession, build_update
@@ -59,6 +61,39 @@ def test_build_dispatcher_injects_booking_service() -> None:
     dispatcher = build_dispatcher(stub)  # type: ignore[arg-type]
 
     assert dispatcher.workflow_data["booking_service"] is stub
+    assert dispatcher.workflow_data["admin_service"] is None
+    assert dispatcher.workflow_data["admin_ids"] == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_run_bot_builds_admin_service_with_configured_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    bot: Bot,
+    fake_session: FakeSession,
+) -> None:
+    database = FakeDatabase()
+    dispatcher = RecordingDispatcher()
+    captured: dict[str, object] = {}
+
+    def fake_build(service: object, admin_service: object = None) -> object:
+        captured["service"] = service
+        captured["admin_service"] = admin_service
+        return dispatcher
+
+    monkeypatch.setattr(app, "create_database", lambda: database)
+    monkeypatch.setattr(app, "build_dispatcher", fake_build)
+    monkeypatch.setattr(app, "Bot", lambda token: bot)
+    settings = Settings(
+        bot_token=SecretStr(TEST_BOT_TOKEN),
+        admin_telegram_ids=frozenset({4242}),
+    )
+
+    await run_bot(settings)
+
+    admin_service = captured["admin_service"]
+    assert isinstance(admin_service, AdminService)
+    assert admin_service.admin_ids == frozenset({4242})
+    assert isinstance(captured["service"], BookingService)
 
 
 class RecordingDispatcher:
@@ -96,7 +131,9 @@ async def test_run_bot_disposes_database_after_polling_stops(
     database = FakeDatabase()
     dispatcher = RecordingDispatcher()
     monkeypatch.setattr(app, "create_database", lambda: database)
-    monkeypatch.setattr(app, "build_dispatcher", lambda service: dispatcher)
+    monkeypatch.setattr(
+        app, "build_dispatcher", lambda service, admin_service=None: dispatcher
+    )
     monkeypatch.setattr(app, "Bot", lambda token: bot)
 
     await run_bot(settings)
@@ -117,7 +154,9 @@ async def test_run_bot_disposes_database_when_polling_fails(
     failure = TelegramNetworkError(method=GetMe(), message="network is down")
     dispatcher = RecordingDispatcher(error=failure)
     monkeypatch.setattr(app, "create_database", lambda: database)
-    monkeypatch.setattr(app, "build_dispatcher", lambda service: dispatcher)
+    monkeypatch.setattr(
+        app, "build_dispatcher", lambda service, admin_service=None: dispatcher
+    )
     monkeypatch.setattr(app, "Bot", lambda token: bot)
 
     with pytest.raises(TelegramNetworkError):
