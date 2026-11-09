@@ -25,31 +25,37 @@ dev = [
 
 [tool.poe.tasks]
 
-# Запуск приложения
+# Existing application commands — preserved exactly.
 dev = "python -m barberbot"
-
-# Тестирование
 test = "pytest"
 test-cov = "pytest --cov=barberbot --cov-report=term-missing"
-
-# Линтинг и форматирование
 lint = "ruff check ."
 lint-fix = "ruff check . --fix"
 format = "ruff format ."
 format-check = "ruff format . --check"
-
-# Статическая типизация
 typecheck = "mypy barberbot"
-
-# Миграции базы данных
-db-upgrade = "alembic upgrade head"
-db-downgrade = "alembic downgrade -1"
-db-history = "alembic history"
-
-# Комплексные проверки
 check = ["lint", "format-check", "typecheck", "test"]
 
-# Docker / PostgreSQL
+# Main database — existing commands retained and supplemented.
+db-upgrade = { cmd = "alembic upgrade head", env = { BARBERBOT_DB_TARGET = "main" } }
+db-downgrade = { cmd = "alembic downgrade -1", env = { BARBERBOT_DB_TARGET = "main" } }
+db-current = { cmd = "alembic current", env = { BARBERBOT_DB_TARGET = "main" } }
+db-history = "alembic history"
+db-heads = "alembic heads"
+db-revision = "alembic revision"
+db-seed = { cmd = "python -m scripts.seed", env = { BARBERBOT_DB_TARGET = "main" } }
+
+# Separate test database. Uses the SAME revision files, not copied migrations.
+db-test-create = "python -m scripts.create_test_db"
+db-test-upgrade = { cmd = "alembic upgrade head", env = { BARBERBOT_DB_TARGET = "test" } }
+db-test-downgrade = { cmd = "alembic downgrade -1", env = { BARBERBOT_DB_TARGET = "test" } }
+db-test-current = { cmd = "alembic current", env = { BARBERBOT_DB_TARGET = "test" } }
+db-test-seed = { cmd = "python -m scripts.seed", env = { BARBERBOT_DB_TARGET = "test" } }
+db-test-smoke = { cmd = "python -m scripts.check_test_db", env = { BARBERBOT_DB_TARGET = "test" } }
+# DANGEROUS: removes all test tables/data; main DB cannot be targeted here.
+db-test-empty = { cmd = "alembic downgrade base", env = { BARBERBOT_DB_TARGET = "test" } }
+
+# Existing Docker commands — preserved exactly.
 db-up = "docker compose up -d db"
 db-down = "docker compose down"
 db-status = "docker compose ps"
