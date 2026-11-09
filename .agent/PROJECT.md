@@ -101,8 +101,11 @@ locations unless the user changes the scope.
   Unit of Work or abstract interface layer.
 - `barberbot/booking/service.py` owns business rules and creates one
   `AsyncSession` per operation, using `async with session.begin()` for writes.
-  Pure slot rules live in `barberbot/booking/slots.py` and are unit-tested
-  without a database.
+  `create_booking()` is a single atomic transaction: the booking insert and the
+  detail reload (`get_with_details`) happen inside the same `begin()` block, so a
+  failed reload rolls back the insert and the caller gets `DatabaseUnavailable`
+  instead of a phantom committed booking. Pure slot rules live in
+  `barberbot/booking/slots.py` and are unit-tested without a database.
 - Booking policy (enforced in the service, not the schema): 30-minute start
   grid, Mon–Fri working hours from `barber_working_hours`, service duration from
   `services`, `Europe/Moscow` via `zoneinfo` (`tzdata` on Windows), no past

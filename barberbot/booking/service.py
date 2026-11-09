@@ -204,6 +204,11 @@ class BookingService:
                         price_rub=price_rub,
                         duration_minutes=duration_minutes,
                     )
+                    # Детали загружаются в этой же транзакции: если чтение не
+                    # удалось, откатывается и сама запись.
+                    booking = await repository.get_with_details(created.id)
+                    if booking is None:
+                        raise DatabaseUnavailable(MESSAGE_DATABASE)
             except IntegrityError as error:
                 # Гонка двух запросов на один слот: окончательное решение
                 # принимает exclusion constraint PostgreSQL.
@@ -211,9 +216,6 @@ class BookingService:
                     raise SlotUnavailable(MESSAGE_SLOT_TAKEN) from None
                 raise DatabaseUnavailable(MESSAGE_DATABASE) from None
 
-            booking = await repository.get_with_details(created.id)
-            if booking is None:  # pragma: no cover - защита от невозможного состояния
-                raise DatabaseUnavailable(MESSAGE_DATABASE)
             return booking
 
     async def list_user_bookings(

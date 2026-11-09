@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from barberbot.booking import errors
@@ -142,6 +142,74 @@ async def test_failed_transaction_rolls_back_every_statement(
             select(Booking).where(Booking.barber_id == barber.id)
         )
     assert [row.id for row in stored] == [existing.id]
+
+
+@pytest.mark.asyncio
+async def test_detail_load_failure_rolls_back_created_booking(
+    database: Any, factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сбой чтения деталей после вставки не должен оставлять запись в БД."""
+    barber = await factory.barber()
+    service = await factory.service()
+    booking_service = BookingService(database.sessions)
+
+    async def failing_details(
+        self: BookingRepository, booking_id: int
+    ) -> Booking | None:
+        raise OperationalError(
+            "SELECT bookings", {}, Exception("simulated detail load failure")
+        )
+
+    monkeypatch.setattr(BookingRepository, "get_with_details", failing_details)
+
+    with pytest.raises(errors.DatabaseUnavailable) as error_info:
+        await booking_service.create_booking(
+            telegram_id=factory.telegram_id(),
+            barber_id=barber.id,
+            service_id=service.id,
+            starts_at=SLOT,
+        )
+
+    assert str(error_info.value) == MESSAGE_DATABASE
+
+    async with database.sessions() as session:
+        stored = await session.scalars(
+            select(Booking).where(Booking.barber_id == barber.id)
+        )
+    assert list(stored) == []
+
+
+@pytest.mark.asyncio
+async def test_missing_details_roll_back_created_booking(
+    database: Any, factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Если детали не найдены, транзакция откатывается целиком."""
+    barber = await factory.barber()
+    service = await factory.service()
+    booking_service = BookingService(database.sessions)
+
+    async def missing_details(
+        self: BookingRepository, booking_id: int
+    ) -> Booking | None:
+        return None
+
+    monkeypatch.setattr(BookingRepository, "get_with_details", missing_details)
+
+    with pytest.raises(errors.DatabaseUnavailable) as error_info:
+        await booking_service.create_booking(
+            telegram_id=factory.telegram_id(),
+            barber_id=barber.id,
+            service_id=service.id,
+            starts_at=SLOT,
+        )
+
+    assert str(error_info.value) == MESSAGE_DATABASE
+
+    async with database.sessions() as session:
+        stored = await session.scalars(
+            select(Booking).where(Booking.barber_id == barber.id)
+        )
+    assert list(stored) == []
 
 
 @pytest.mark.asyncio
