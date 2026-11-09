@@ -14,6 +14,7 @@ from barberbot.booking.service import BookingService
 from barberbot.config import Settings
 from barberbot.db.engine import Database, create_database
 from barberbot.handlers import build_main_router
+from barberbot.middleware import PrivateChatOnlyMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,17 @@ def build_dispatcher(booking_service: BookingService) -> Dispatcher:
     параллельно с первым. ``CompletionScheduler`` тоже живёт в
     ``workflow_data``: его запускает ``on_startup``, останавливает
     ``on_shutdown``, который aiogram вызывает и при ошибке polling.
+
+    ``PrivateChatOnlyMiddleware`` регистрируется первым уровнем обработки
+    updates: клиентские функции доступны только в личных чатах, проверка
+    выполняется до фильтров, обработчиков и обращения к сервису.
     """
     dispatcher = Dispatcher(
         booking_service=booking_service,
         completion_scheduler=CompletionScheduler(booking_service),
         events_isolation=SimpleEventIsolation(),
     )
+    dispatcher.update.outer_middleware(PrivateChatOnlyMiddleware())
     dispatcher.include_router(build_main_router())
     dispatcher.startup.register(on_startup)
     dispatcher.shutdown.register(on_shutdown)

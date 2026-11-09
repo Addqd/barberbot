@@ -204,6 +204,24 @@ locations unless the user changes the scope.
 - Booking, cancellation, listing, slot protection and the exclusion constraint
   are unchanged: `completed` remains an active status for slot occupancy.
 
+## Confirmed architecture — private chats only (security fix)
+
+- Client features (catalog, FSM booking, my bookings, cancellation, navigation)
+  are reachable only from Telegram `private` chats. The single boundary is
+  `PrivateChatOnlyMiddleware` (`barberbot/middleware.py`) registered in
+  `build_dispatcher()` as `dispatcher.update.outer_middleware(...)`, so it runs
+  for every update before filters, handlers and any `BookingService` call.
+- Chat type comes only from Telegram chat context (`chat.type`), never from
+  `from_user.id`. Messages/edited messages from `group`/`supergroup` (and other
+  non-private chats) are ignored. Callback queries from non-private chats are
+  stopped and answered with `PRIVATE_CHAT_ONLY` (`show_alert=True`) so no
+  spinner is left and no personal data is published.
+- Fail closed: a callback without an accessible `message` (inline mode) or with
+  an undeterminable chat is rejected. `InaccessibleMessage` carries `chat`, so
+  it is checked like a regular message; private+inaccessible still works.
+- Business rules, booking algorithms, FSM, keys, schema, migrations, scheduler
+  and existing handlers are unchanged; only the update boundary was added.
+
 ## Environment note
 
 - On the development machine direct TCP access to `api.telegram.org:443` is

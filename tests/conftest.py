@@ -146,11 +146,14 @@ def message_payload(
     *,
     user_id: int = TEST_CHAT_ID,
     message_id: int = 1,
+    chat_id: int | None = None,
+    chat_type: str = "private",
 ) -> dict[str, Any]:
+    """Payload сообщения; ``chat_type``/``chat_id`` задают контекст чата."""
     return {
         "message_id": message_id,
         "date": NOW,
-        "chat": {"id": user_id, "type": "private"},
+        "chat": {"id": user_id if chat_id is None else chat_id, "type": chat_type},
         "from": {"id": user_id, "is_bot": False, "first_name": "Тест"},
         "text": text,
         "entities": [{"type": "bot_command", "offset": 0, "length": len(text)}],
@@ -162,16 +165,26 @@ def callback_payload(
     *,
     user_id: int = TEST_CHAT_ID,
     message_id: int = 2,
+    chat_id: int | None = None,
+    chat_type: str = "private",
+    include_message: bool = True,
 ) -> dict[str, Any]:
-    return {
+    """Payload callback; ``include_message=False`` — callback без ``message``."""
+    payload: dict[str, Any] = {
         "id": "callback-1",
         "from": {"id": user_id, "is_bot": False, "first_name": "Тест"},
         "chat_instance": "chat-instance",
         "data": data,
-        "message": message_payload(
-            "Сообщение бота", user_id=user_id, message_id=message_id
-        ),
     }
+    if include_message:
+        payload["message"] = message_payload(
+            "Сообщение бота",
+            user_id=user_id,
+            message_id=message_id,
+            chat_id=chat_id,
+            chat_type=chat_type,
+        )
+    return payload
 
 
 def callback_answers(session: FakeSession) -> list[AnswerCallbackQuery]:
