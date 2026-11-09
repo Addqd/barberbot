@@ -126,6 +126,58 @@ locations unless the user changes the scope.
 - `reminders` is mapped as ORM but reminder scheduling/delivery is not
   implemented; Telegram FSM booking stays in GROUP III.
 
+## Confirmed architecture — GROUP III (client Telegram UI)
+
+- The client UI is implemented in `barberbot/handlers/`: `common.py` (commands,
+  main menu), `services.py` (catalog), `booking.py` (FSM scenario),
+  `my_bookings.py` (list/card/cancel), `fallback.py` (stale/unknown callbacks),
+  `render.py` (edit-or-send helper), and the router order in `__init__.py`
+  (fallback last).
+- Presentation is separated from the booking engine: `callbacks.py` (typed
+  `CallbackData`), `fsm.py` (`BookingFlow`, safe parsing of FSM data),
+  `ui.py` (Moscow formatting, statuses, display sorting, UI-only cancel
+  eligibility), `messages.py` (Russian texts), `keyboards.py` (all keyboards).
+- `BookingService` remains the single source of booking rules. GROUP III only
+  added two read-only methods, `list_active_services()` and
+  `list_active_barbers()`; slot calculation, creation, listing and cancellation
+  are unchanged. Handlers never compute availability themselves.
+- Callback data is untrusted: no Telegram ID is carried inside it. The user is
+  always identified by `event.from_user.id`. Typed `CallbackData.filter()`
+  rejects bad prefixes/fields/types; `StateFilter` binds each button to its FSM
+  step; a final catch-all callback handler answers every stale/unknown press so
+  no spinner is left. Service IDs, barber IDs, dates and times from callbacks
+  are re-checked against fresh DB data before use, and `create_booking()`
+  revalidates everything again (exclusion constraint is the final guard).
+- Booking flow states: `service → barber → date → time → confirm`. Dates are
+  refetched on every page/step (horizon owned by the service), paginated 6 per
+  page; time is passed as a Unix timestamp and re-checked against
+  `available_slots()`; the day is stored as an ISO date. `START_AT` is stored as
+  an ISO datetime with timezone, and the final handler verifies that its Moscow
+  date equals the selected day.
+- FSM uses aiogram's default in-memory storage (no Redis). State loss is
+  tolerated: handlers validate FSM data and restart the scenario with a clear
+  message. `/start` clears the state; going back resets dependent keys by
+  `state.set_data(...)` at each step.
+- Cancellation UI is hint-only: `ui.is_cancellable()` (real clock, status
+  `confirmed`, at least 2 hours before start) decides whether to show the
+  button, but `BookingService.cancel_booking()` is authoritative. The handler
+  also pre-checks status/deadline for clean messages; ownership is enforced by
+  looking the booking up in the user's own list and again by the service.
+- Double “Подтвердить” is prevented by `StateFilter` (state is cleared after
+  success) plus `SimpleEventIsolation` on the dispatcher, which serializes
+  updates of the same chat. The PostgreSQL exclusion constraint remains the
+  final protection against two bookings for one slot.
+- Dependency injection/lifecycle: `build_dispatcher(booking_service)` stores the
+  service in `Dispatcher.workflow_data`; handlers receive it by argument name.
+  `run_bot()` creates one `Database` per process, builds `BookingService` from
+  its session factory, and disposes the engine and closes the Telegram session
+  in `finally`, including startup failures. Migrations are never run on bot
+  start. `SelectorEventLoop` on Windows is unchanged.
+- Tests: `FakeSession` now records `EditMessageText` as well; navigation/command
+  tests use `tests/fakes.py::FakeBookingService` without a database. Critical
+  flows run through a real `Dispatcher.feed_update` with the real
+  `BookingService` against `barberbot_test` only. No Telegram network calls.
+
 ## Environment note
 
 - On the development machine direct TCP access to `api.telegram.org:443` is

@@ -14,7 +14,12 @@ import pytest
 import pytest_asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import AnswerCallbackQuery, SendMessage, TelegramMethod
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    SendMessage,
+    TelegramMethod,
+)
 from aiogram.types import Chat, Message, Update
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,6 +38,8 @@ from barberbot.db.models import (
     User,
 )
 from barberbot.db_settings import database_names, get_settings
+
+from .fakes import FakeBookingService
 
 TEST_BOT_TOKEN = "123456789:TEST-token-value-for-unit-tests-only"
 TEST_CHAT_ID = 42
@@ -91,6 +98,17 @@ class FakeSession(BaseSession):
                 chat=Chat(id=TEST_CHAT_ID, type="private"),
                 text=method.text,
             )
+        if isinstance(method, EditMessageText):
+            chat_id = (
+                method.chat_id if isinstance(method.chat_id, int) else TEST_CHAT_ID
+            )
+            return Message(
+                message_id=method.message_id or self._last_message_id,
+                date=datetime.now(UTC),
+                chat=Chat(id=chat_id, type="private"),
+                text=method.text,
+                reply_markup=method.reply_markup,
+            )
         raise AssertionError(f"Неожиданный запрос к Bot API: {type(method).__name__}")
 
 
@@ -114,8 +132,74 @@ def bot(fake_session: FakeSession) -> Bot:
 
 
 @pytest.fixture
-def dispatcher() -> Dispatcher:
-    return build_dispatcher()
+def dispatcher(booking_service_stub: FakeBookingService) -> Dispatcher:
+    return build_dispatcher(booking_service_stub)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def booking_service_stub() -> FakeBookingService:
+    return FakeBookingService()
+
+
+def message_payload(
+    text: str,
+    *,
+    user_id: int = TEST_CHAT_ID,
+    message_id: int = 1,
+) -> dict[str, Any]:
+    return {
+        "message_id": message_id,
+        "date": NOW,
+        "chat": {"id": user_id, "type": "private"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "Тест"},
+        "text": text,
+        "entities": [{"type": "bot_command", "offset": 0, "length": len(text)}],
+    }
+
+
+def callback_payload(
+    data: str,
+    *,
+    user_id: int = TEST_CHAT_ID,
+    message_id: int = 2,
+) -> dict[str, Any]:
+    return {
+        "id": "callback-1",
+        "from": {"id": user_id, "is_bot": False, "first_name": "Тест"},
+        "chat_instance": "chat-instance",
+        "data": data,
+        "message": message_payload(
+            "Сообщение бота", user_id=user_id, message_id=message_id
+        ),
+    }
+
+
+def callback_answers(session: FakeSession) -> list[AnswerCallbackQuery]:
+    return [
+        request
+        for request in session.requests
+        if isinstance(request, AnswerCallbackQuery)
+    ]
+
+
+def sent_messages(session: FakeSession) -> list[SendMessage]:
+    return [request for request in session.requests if isinstance(request, SendMessage)]
+
+
+def edited_messages(session: FakeSession) -> list[EditMessageText]:
+    return [
+        request for request in session.requests if isinstance(request, EditMessageText)
+    ]
+
+
+def last_text(session: FakeSession) -> str:
+    """Текст последнего показанного пользователю сообщения."""
+    for request in reversed(session.requests):
+        if isinstance(request, EditMessageText):
+            return request.text
+        if isinstance(request, SendMessage):
+            return request.text
+    raise AssertionError("Бот не отправил ни одного сообщения")
 
 
 # --------------------------------------------------------------------------- #
@@ -318,3 +402,11 @@ async def booking_service(
     sessions: async_sessionmaker[AsyncSession],
 ) -> AsyncGenerator[BookingService]:
     yield BookingService(sessions, clock=lambda: FIXED_NOW)
+
+
+@pytest_asyncio.fixture
+async def live_dispatcher(
+    booking_service: BookingService,
+) -> AsyncGenerator[Dispatcher]:
+    """Dispatcher с настоящим BookingService (тестовая PostgreSQL)."""
+    yield build_dispatcher(booking_service)

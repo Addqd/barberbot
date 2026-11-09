@@ -218,6 +218,18 @@ class BookingService:
 
             return booking
 
+    async def list_active_services(self) -> list[Service]:
+        """Активные услуги в порядке идентификаторов (для клиентского меню)."""
+        async with self._operation() as session:
+            services = await CatalogRepository(session).list_active_services()
+        return list(services)
+
+    async def list_active_barbers(self) -> list[Barber]:
+        """Активные мастера в порядке идентификаторов (для клиентского меню)."""
+        async with self._operation() as session:
+            barbers = await CatalogRepository(session).list_active_barbers()
+        return list(barbers)
+
     async def list_user_bookings(
         self, telegram_id: int, *, include_cancelled: bool = True
     ) -> list[Booking]:
