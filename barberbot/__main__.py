@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from aiogram.exceptions import (
     TelegramAPIError,
@@ -27,7 +28,11 @@ def main() -> int:
         return 1
 
     try:
-        asyncio.run(run_bot(settings))
+        # Psycopg async requires SelectorEventLoop on Windows 10.
+        asyncio.run(
+            run_bot(settings),
+            loop_factory=asyncio.SelectorEventLoop if sys.platform == "win32" else None,
+        )
     except KeyboardInterrupt:
         logger.info("Получен Ctrl+C, бот останавливается")
     except TelegramNetworkError as error:

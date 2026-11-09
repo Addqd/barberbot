@@ -74,6 +74,55 @@ locations unless the user changes the scope.
   that records Bot API method objects. No network, no Telegram, no PostgreSQL.
 - No database models, migrations, FSM, webhook or extra dependencies in TASK 001.
 
+## Confirmed architecture — GROUP II (ORM, data layer, booking engine)
+
+- Schema ownership stays with Alembic (`alembic/versions/0001_initial_schema`).
+  `metadata.create_all()` / `drop_all()` are never used in application code.
+  `alembic/env.py` now exposes `target_metadata = Base.metadata` so a future,
+  explicitly authorized autogenerate can compare models with the database;
+  autogenerate was not invoked and no migration was added or edited.
+- The PostgreSQL exclusion constraint `ex_bookings_barber_no_overlap` is the
+  final safeguard against double booking. It is declared in ORM metadata for
+  completeness but remains migration-owned. SQLSTATE `23P01` is translated into
+  the domain error `SlotUnavailable` after the transaction rollback.
+- Typed SQLAlchemy 2.x ORM in `barberbot/db/models.py` mirrors all seven tables,
+  including column types, PKs, named unique/check constraints, indexes, FKs and
+  relationships. Status columns are `StrEnum` values stored in `VARCHAR(16)`
+  ("confirmed/cancelled/completed", "pending/sent/failed/cancelled") without a
+  PostgreSQL enum type, matching the existing check constraints.
+- `barberbot/db/engine.py` builds one `AsyncEngine` (Psycopg 3, `pool_pre_ping`,
+  `hide_parameters`) and an `async_sessionmaker(expire_on_commit=False)`.
+  Connection settings come from `barberbot/db_settings.py` + `.env`; credentials
+  are never duplicated in code. The caller owns the engine lifecycle and must
+  call `Database.dispose()` on shutdown (wiring into the bot runtime is GROUP III).
+- Data access is a thin repository layer in `barberbot/db/repositories.py`
+  (`UserRepository`, `CatalogRepository`, `ScheduleRepository`,
+  `BookingRepository`). Repositories receive an `AsyncSession`; there is no
+  Unit of Work or abstract interface layer.
+- `barberbot/booking/service.py` owns business rules and creates one
+  `AsyncSession` per operation, using `async with session.begin()` for writes.
+  Pure slot rules live in `barberbot/booking/slots.py` and are unit-tested
+  without a database.
+- Booking policy (enforced in the service, not the schema): 30-minute start
+  grid, Mon–Fri working hours from `barber_working_hours`, service duration from
+  `services`, `Europe/Moscow` via `zoneinfo` (`tzdata` on Windows), no past
+  starts, half-open `[start, end)` intervals, `barber_time_off` respected,
+  cancellation allowed only by the owner and no later than 2 hours before start.
+- Domain errors in `barberbot/booking/errors.py` are distinct and contain only
+  Russian user-facing text: no SQL, DSN, credentials or DB internals.
+- Windows 10 requires `SelectorEventLoop` for Psycopg async. `barberbot/__main__.py`
+  passes it to `asyncio.run`, and `tests/conftest.py` provides it through
+  `pytest_asyncio_loop_factories`.
+- Integration tests run against `<POSTGRES_DB>_test` only. The `database` fixture
+  verifies `current_database()` before yielding and fails hard on mismatch.
+  Test rows use unique `__test_...` names / negative Telegram IDs and are deleted
+  by a factory fixture; seeded demo data is never modified.
+- Concurrency is tested with independent sessions/connections: two simultaneous
+  requests for one slot (exactly one success), direct overlapping inserts
+  (one `23P01`), and different barbers at the same time (both succeed).
+- `reminders` is mapped as ORM but reminder scheduling/delivery is not
+  implemented; Telegram FSM booking stays in GROUP III.
+
 ## Environment note
 
 - On the development machine direct TCP access to `api.telegram.org:443` is

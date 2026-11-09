@@ -1,7 +1,10 @@
-"""Manual migrations for PostgreSQL, without ORM metadata (TASK 002 prep).
+"""Manual migrations for PostgreSQL, with read-only ORM metadata.
 
-Future ORM models should be reflected in target_metadata by Pi *only when
-explicitly authorized*. Autogenerate is deliberately unavailable for now.
+``target_metadata`` reflects the ORM models so a future, explicitly authorized
+``alembic revision --autogenerate`` can compare them with the database.
+Autogenerate itself stays unavailable: the schema is still authored by hand in
+``alembic/versions`` and the PostgreSQL exclusion constraint remains
+migration-owned.
 """
 
 from __future__ import annotations
@@ -11,13 +14,14 @@ from logging.config import fileConfig
 from sqlalchemy import create_engine, pool
 
 from alembic import context
+from barberbot.db import Base
 from barberbot.db_settings import database_url, get_settings
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = None
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
