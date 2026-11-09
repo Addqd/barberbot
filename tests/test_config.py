@@ -94,7 +94,8 @@ def test_postgres_variables_do_not_break_configuration(
     settings = load_settings(env_file=None)
 
     assert settings.bot_token.get_secret_value() == TEST_TOKEN
-    assert set(settings.model_dump()) == {"bot_token"}
+    assert set(settings.model_dump()) == {"bot_token", "admin_telegram_ids"}
+    assert settings.admin_telegram_ids == frozenset()
 
 
 def test_settings_do_not_expose_token_in_text(monkeypatch: pytest.MonkeyPatch) -> None:

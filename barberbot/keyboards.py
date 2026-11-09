@@ -16,6 +16,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from barberbot import callbacks as cb
 from barberbot import ui
+from barberbot.admin.callbacks import AdminPanelCB
 from barberbot.db.models import Barber, Booking, Service
 
 #: Сколько дат показывать на одной странице списка.
@@ -29,15 +30,16 @@ def _button(text: str, data: CallbackData) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data.pack())
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Главное меню: три раздела, доступные из ``/start``."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [_button("✂️ Записаться", cb.MenuBookCB())],
-            [_button("💈 Услуги и цены", cb.MenuServicesCB())],
-            [_button("📅 Мои записи", cb.MenuBookingsCB())],
-        ]
-    )
+def main_menu_keyboard(*, admin: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню: три клиентских раздела и панель для администратора."""
+    rows = [
+        [_button("✂️ Записаться", cb.MenuBookCB())],
+        [_button("💈 Услуги и цены", cb.MenuServicesCB())],
+        [_button("📅 Мои записи", cb.MenuBookingsCB())],
+    ]
+    if admin:
+        rows.append([_button("⚙️ Админ-панель", AdminPanelCB())])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _flow_nav(back: CallbackData | None) -> list[list[InlineKeyboardButton]]:

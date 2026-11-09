@@ -43,7 +43,8 @@ locations unless the user changes the scope.
 ## Open decisions — do not invent
 
 - Exact prices, durations, operating hours and timezone.
-- Admin identities and authorization bootstrap.
+- Admin identities and authorization bootstrap — **confirmed in TASK IV.1**:
+  `ADMIN_TELEGRAM_IDS` (fail closed, see the admin panel section below).
 - Reminder timing and delivery/retry policies.
 - Persistence/service layer layout (to be chosen in the database task).
 
@@ -221,6 +222,56 @@ locations unless the user changes the scope.
   it is checked like a regular message; private+inaccessible still works.
 - Business rules, booking algorithms, FSM, keys, schema, migrations, scheduler
   and existing handlers are unchanged; only the update boundary was added.
+
+## Confirmed architecture — TASK IV.1 (admin panel)
+
+- Administrator identity comes only from the ``ADMIN_TELEGRAM_IDS`` environment
+  variable, parsed by Pydantic Settings into ``frozenset[int]`` with
+  ``NoDecode`` + ``BeforeValidator`` (comma-separated positive IDs, ``BIGINT``
+  bound). Missing/blank means *no administrators* (fail closed); any invalid
+  element rejects the whole configuration through the existing
+  ``ConfigurationError`` path, which prints field names only.
+- Authorization is checked twice and always from Telegram context
+  (``event.from_user.id``), never from ``callback_data``:
+  1. ``AdminOnlyMiddleware`` is registered as **inner** middleware on the admin
+     router's ``callback_query`` and ``message`` observers. Inner (not outer) is
+     deliberate: an outer middleware on a router also runs for updates that no
+     handler matches, so it would answer every unrelated user message.
+  2. Every public ``AdminService`` method calls ``_authorize()`` before doing
+     anything else. A meta test asserts this for all public coroutine methods.
+- ``AdminService.admin_ids`` is the single source of truth: ``build_dispatcher``
+  derives the guard's ID set and the main-menu flag from it, and the admin
+  router is always registered (with an empty set when there is no service).
+- ``PrivateChatOnlyMiddleware`` stays unchanged and remains the only chat-type
+  boundary; the admin panel does not duplicate it.
+- Admin code is split like the client UI: ``barberbot/admin/`` (``errors``,
+  ``service``, ``fsm``, ``callbacks``, ``keyboards``, ``texts``) plus
+  ``barberbot/handlers/admin.py`` (guard + handlers + ``build_router``). The
+  admin router is included after client routers and before the fallback.
+- Business rules live in ``AdminService`` (authorization, runtime validation,
+  pagination, conflict policy); SQL lives in the existing repositories
+  (``CatalogRepository``, ``ScheduleRepository``, ``BookingRepository``). Write
+  operations run in one ``session.begin()`` transaction; row locks
+  (``with_for_update``) serialize service/barber edits and admin cancellations.
+- Service snapshots are never rewritten; disabling a service or barber only
+  hides it from new bookings, history stays. Nothing is physically deleted
+  except ``barber_time_off`` rows (an exclusion, not a service/barber/booking).
+- Schedule and time-off edits are rejected with ``AdminConflict`` (message lists
+  the future confirmed bookings) when they would invalidate existing future
+  bookings; the admin cancels those bookings first. Known residual race: a
+  client booking created concurrently in the same instant is validated against
+  the pre-change schedule; the PostgreSQL exclusion constraint still prevents
+  double booking, and the admin transaction re-checks conflicts under a barber
+  row lock.
+- Admin cancellation intentionally bypasses the 2-hour client rule but still
+  requires an explicit confirmation step; status is re-read under
+  ``SELECT ... FOR UPDATE``, so repeated or parallel cancels yield exactly one
+  success (``AdminBookingState`` afterwards).
+- New barbers are created inactive: a barber without working hours must not
+  appear in the client catalog.
+- Main menu: ``main_menu_keyboard(admin=...)`` appends «⚙️ Админ-панель» only
+  for an ID in the set; ``/start`` and «🏠 Главное меню» resolve the flag from
+  ``admin_ids`` in ``workflow_data``.
 
 ## Environment note
 

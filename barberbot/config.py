@@ -7,12 +7,69 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated, Any
 
 from aiogram.utils.token import TokenValidationError, validate_token
-from pydantic import Field, SecretStr, ValidationError, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BeforeValidator, Field, SecretStr, ValidationError, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+#: Верхняя граница ``BIGINT`` PostgreSQL для Telegram ID.
+MAX_TELEGRAM_ID = 2**63 - 1
+
+
+class _AdminIdError(ValueError):
+    """Некорректный формат списка администраторов (значение не выводится)."""
+
+
+def parse_admin_telegram_ids(value: Any) -> frozenset[int]:
+    """Разобрать ``ADMIN_TELEGRAM_IDS``: положительные ID через запятую.
+
+    Пустая строка или отсутствие значения означают, что администраторов нет
+    (**fail closed**). Любой некорректный элемент отклоняет всю конфигурацию:
+    частично угаданный список администраторов недопустим. Текст ошибки не
+    содержит исходное значение.
+    """
+    if value is None:
+        return frozenset()
+    if isinstance(value, frozenset | set | list | tuple):
+        items: list[Any] = list(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return frozenset()
+        items = raw.split(",")
+    else:
+        raise _AdminIdError("ADMIN_TELEGRAM_IDS должен быть списком ID через запятую")
+
+    telegram_ids: set[int] = set()
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+
+            if not text or not text.isascii() or not text.isdigit():
+                raise _AdminIdError(
+                    "ADMIN_TELEGRAM_IDS: ожидаются целые положительные ID через запятую"
+                )
+            number = int(text)
+        elif isinstance(item, int) and not isinstance(item, bool):
+            number = item
+        else:
+            raise _AdminIdError("ADMIN_TELEGRAM_IDS: ожидаются целые положительные ID")
+
+        if number <= 0 or number > MAX_TELEGRAM_ID:
+            raise _AdminIdError(
+                "ADMIN_TELEGRAM_IDS: ID должен быть положительным числом"
+            )
+        telegram_ids.add(number)
+    return frozenset(telegram_ids)
+
+
+#: Тип поля: строка из ``.env`` не декодируется как JSON, а разбирается выше.
+AdminTelegramIds = Annotated[
+    frozenset[int], NoDecode, BeforeValidator(parse_admin_telegram_ids)
+]
 
 
 class ConfigurationError(RuntimeError):
@@ -39,6 +96,10 @@ class Settings(BaseSettings):
     )
 
     bot_token: SecretStr = Field(description="Токен Telegram-бота из BotFather")
+    admin_telegram_ids: AdminTelegramIds = Field(
+        default_factory=frozenset,
+        description="Telegram ID администраторов через запятую",
+    )
 
     @field_validator("bot_token")
     @classmethod
@@ -68,7 +129,8 @@ def _describe_error(error: ValidationError) -> str:
     return (
         f"Некорректная конфигурация: {reason}. "
         "Проверьте .env: BOT_TOKEN обязателен, не должен быть пустым "
-        "и должен иметь вид <id>:<ключ>."
+        "и должен иметь вид <id>:<ключ>; ADMIN_TELEGRAM_IDS — необязательный "
+        "список положительных Telegram ID через запятую."
     )
 
 

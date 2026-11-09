@@ -99,4 +99,28 @@ class FakeBookingService:
         raise AssertionError("cancel_booking не ожидается в этом тесте")
 
 
-__all__ = ["FakeBookingService", "make_barber", "make_service"]
+class FakeAdminService:
+    """Минимальная заглушка административного сервиса.
+
+    В тестах авторизации административные обработчики не вызываются: проверяются
+    guard-мидлварь и состав главного меню. Полный ``AdminService`` проверяется
+    интеграционными тестами на реальной тестовой базе.
+    """
+
+    def __init__(self, admin_ids: frozenset[int] = frozenset()) -> None:
+        self._admin_ids = frozenset(admin_ids)
+
+    @property
+    def admin_ids(self) -> frozenset[int]:
+        return self._admin_ids
+
+    def is_admin(self, telegram_id: int) -> bool:
+        return telegram_id in self._admin_ids
+
+
+__all__ = [
+    "FakeAdminService",
+    "FakeBookingService",
+    "make_barber",
+    "make_service",
+]

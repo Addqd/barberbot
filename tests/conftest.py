@@ -268,6 +268,14 @@ class DataFactory:
         self._telegram_ids.append(telegram_id)
         return telegram_id
 
+    def track_service(self, service_id: int) -> None:
+        """Зарегистрировать услугу, созданную не через фабрику, для очистки."""
+        self._services.append(service_id)
+
+    def track_barber(self, barber_id: int) -> None:
+        """Зарегистрировать мастера, созданного не через фабрику, для очистки."""
+        self._barbers.append(barber_id)
+
     async def user(
         self, *, telegram_id: int | None = None, display_name: str | None = None
     ) -> User:
